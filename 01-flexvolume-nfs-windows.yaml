@@ -28,14 +28,17 @@ spec:
       - name: flexvolume-nfs-windows
         image: mcr.microsoft.com/powershell:7.1.0-preview.5-nanoserver-1809
         imagePullPolicy: Always
+        env:
+        - name: DRIVER
+          value: q1autoops-win
         command: 
         - pwsh.exe
         args:
         - /Command
-        - mkdir -Force c:\host\q1-win~nfs.cmd;
-        - cp -Force c:\kubelet-plugins\flexvolume.ps1 c:\host\q1-win~nfs.cmd;
-        - cp -Force c:\kubelet-plugins\nfs.cmd c:\host\q1-win~nfs.cmd;
-        - cp -Force c:\kubelet-plugins\nfs.ps1 c:\host\q1-win~nfs.cmd;
+        - mkdir -Force c:\host\${DRIVER}~nfs.cmd;
+        - cp -Force c:\kubelet-plugins\flexvolume.ps1 c:\host\${DRIVER}~nfs.cmd;
+        - cp -Force c:\kubelet-plugins\nfs.cmd c:\host\${DRIVER}~nfs.cmd;
+        - cp -Force c:\kubelet-plugins\nfs.ps1 c:\host\${DRIVER}~nfs.cmd;
         - cat c:\kubelet-plugins\Readme.md;
         - while ($true) {start-sleep -s 3600}
         securityContext:
