@@ -130,8 +130,11 @@ data:
         {
         }
 
+        #create a symbolic link using powershell (doesn't work for volumes)
+        $link = new-item -ItemType SymbolicLink -Path $symlink -Value $remoteP
+    
         #volume symbolic link workaround below
-        cmd /c "mklink /D $symlink $remotepath" 2>&1  | Out-Null
+        #cmd /c "mklink /D $symlink $remotepath" 2>&1  | Out-Null
         #ensure symlink was created
         $item = get-item $symlink
         #should test that 
