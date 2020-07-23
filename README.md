@@ -57,8 +57,10 @@ For some installations, you may need to change the vendor + driver name. You can
       containers:
         - image: mcr.microsoft.com/powershell:7.1.0-preview.5-nanoserver-1809
           env:
-            - name: DRIVER
-              value: q1autoops-win
+          - name: DRIVER
+            value: q1autoops-win
+          command: 
+          - pwsh.exe
           args:
           - /Command
           - mkdir -Force c:\host\${DRIVER}~nfs.cmd;
