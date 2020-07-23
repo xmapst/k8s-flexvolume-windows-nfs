@@ -1,0 +1,416 @@
+kind: ConfigMap
+metadata:
+  name: flexvolume-nfs-windows
+  namespace: kube-system
+
+apiVersion: v1
+data:
+  flexvolume.ps1: |-
+    $debug_mode = $true
+    $exitCode = 0
+    $logName = "Application"
+    $logId = 1
+    
+    if($logSource -eq $null)
+    {
+        throw "Define logSource before including this script"
+    }
+    
+    #delete a symbolic link
+    Function DeleteSymLink($path)
+    {
+        $item = get-item $path
+        #should test that 
+        if($item.linkType -eq "SymbolicLink")
+        {
+            $item.delete()
+        }
+    }
+    
+    #allow you to expect an item and throw a useful message
+    Filter GetFirst
+    {
+        Param([string] $message)
+        Begin
+        {
+            $foundItem = $false;
+        }
+        Process
+        {
+            if(-not $foundItem)
+            {
+                $foundItem = $true
+                $_
+            }
+        }
+        End
+        {
+            if(-not $foundItem)
+            {
+                throw $message
+            }
+        }
+    }
+    
+    Function IsSymLinkToPath($symLink, $path)
+    {
+        if($item.LinkType -eq $null)
+        {
+            return $false
+        }
+        $target = $item.target[0]
+        if($path.SubString(0, 2) -eq "\\")
+        {
+            # for nfs try
+            # UNC\machinename instead of \\machinename
+            if(("UNC" + $path.Substring(1)) -eq $target)
+            {
+                return $true
+            }
+            # for volumes try 
+            # Voume instead of \\?\Volume
+            if($path.SubString(0, 4) -eq "\\?\")
+            {
+                if($target -eq $path.Substring(4))
+                {
+                    return $true
+                }
+            }
+        }
+        if($target -eq $path)
+        {
+            return $true
+        }
+        return $false
+    }
+    
+    #create the symbolic link for kubernetes
+    Function MakeSymLink($symlink, $remotepath)
+    {
+        Log  "mklink $symlink $remotePath"
+        # flexvolume may have already created the folder at the location the symlink should be
+        # I think this is for bind mount in linux
+        # this does not work for windows, so lets delete the folder
+        if($(test-path $symlink -PathType Container))
+        {
+            $item = get-item $symlink
+            if($item.LinkType -eq $null)
+            {
+                Log "deleting folder $symlink"
+                #if not empty this will throw
+                $item.delete()
+            }
+        }
+        if($(test-path $symlink -PathType Container))
+        {
+            $item = get-item $symlink
+            if($item.LinkType -eq "SymbolicLink")
+            {
+                if(IsSymLinkToPath -symLink $item -path $remotePath)
+                {
+                    Log "symlink already existed"
+                    return
+                }
+                else
+                {
+                    Log "stale symlink already existed to old path $($item.target[0])"
+                    DeleteSymLink $symlink
+                }
+            }
+            else
+            {
+                throw "Cannot make symlink $symlink to $remotepath due to folder already existing"
+            }
+        }
+        elseif( $(test-path $symlink))
+        {
+            throw "Cannot make symlink $symlink to $remotepath due to file already existing"
+        }
+        else
+        {
+        }
+
+        #volume symbolic link workaround below
+        cmd /c "mklink /D $symlink $remotepath" 2>&1  | Out-Null
+        #ensure symlink was created
+        $item = get-item $symlink
+        #should test that 
+        if($item.linkType -ne "SymbolicLink")
+        {
+            throw "$symlink was not created"
+        }
+        Log $item
+    }
+    
+    function Log([string] $s)
+    { 
+        #if(($s -eq $null) -or $s.Trim() -eq "")
+        #{
+        #$s = <empty>
+        #}
+        # always prepending message as things are cleaner for empty lines
+        Write-EventLog -LogName $logName -Source $logSource -EntryType Information -EventId $logId -Message "log: $s"
+    }
+    
+    function DebugLog([string] $s)
+    { 
+        if($debug_mode)
+        {
+            Log $s
+        }
+    }
+    function Print([string] $s) 
+    {
+        write-host $s
+    }
+    
+    function LogAndPrint([string] $s) 
+    {
+        Print $s
+        Log $s
+    }
+    
+    function NormalizePath([string] $s)
+    {
+        # v1.5  $('c:' + $s.replace('/','\'))
+        $s.replace('/', '\')
+    }
+    
+    function Base64Decode([string] $s)
+    {
+        [System.Text.Encoding]::ASCII.GetString([System.Convert]::FromBase64String($s))
+    }
+    
+    
+    function DoCommand ( [Parameter(Mandatory = $true)] [string] $command, 
+        [bool] $throw = $false,
+        [object[]] $objectList = @() )
+    {
+        $scriptBlock = [scriptblock]::Create($command)
+        $b = Invoke-command  -ErrorVariable err -ScriptBlock $scriptBlock -OutVariable output -ArgumentList $objectList
+        if($throw -And $err -ne $null)
+        {
+            throw $err[0]
+        }
+        return $output
+    }
+    function DoCommandValidateErrorCode([Parameter(Mandatory = $true)] [string] $command )
+    {
+        $output = DoCommand $command
+        $errorCode = $LASTEXITCODE 
+        if($errorCode -ne 0)
+        {
+            $errorMessage = "Error $errorCode running command $command"
+            Log $errorMessage
+            throw $errorMessage
+        }
+        return $output
+    }
+    
+    function GetParentPid($processId)
+    {
+        gwmi win32_process -Filter "ProcessId='$processId'" | % { $_.parentprocessid}
+    }
+    
+    function GetCommandLine($processId)
+    {
+        gwmi win32_process -Filter "ProcessId='$processId'" | % { $_.commandline}
+    }
+    
+    
+    New-EventLog -LogName $logName -Source $logSource -ErrorAction Ignore
+    
+    function RunFlexVolume()
+    {
+        $command = $env:flexvolume_command
+        $folder = $env:flexvolume_folder
+        $json = $null
+        $cmdline = GetCommandLine $(GetParentPid $pid)
+        
+        DebugLog "command: $command"
+        DebugLog "folder: $folder"
+        DebugLog "cmdline: $cmdline"
+        if($folder -ne $null)
+        {
+            # No longer use flexvolume_all as it has problems with the sequence !@#
+            # I am also doing this because of batch rules and ',' escaping rules
+            #
+            # Take the hammer approach and get the commandline of the parent process and parse
+            # after the script file name
+            $firstDotCmdRemoved = $cmdline.substring($cmdline.IndexOf(".cmd") + 4)
+            $secondDotCmdRemoved = $firstDotCmdRemoved.substring($firstDotCmdRemoved.IndexOf(".cmd") + 4)
+    
+            $all = $secondDotCmdRemoved.Trim('" ')
+    
+            # remove the first 2 args by string length and removing white space inbetween
+            # this was the "best" work around for getting the json args
+            $escapedJson = $all.Substring($command.Length).Trim().SubString($folder.Length)
+            $json = $escapedJson.Replace('\"', '"')
+            
+            DebugLog "json: $json"
+        }
+    
+        Log "$command"
+        try
+        {
+            if($command -eq $null)
+            {
+                exit 0
+            }
+            if($command -eq "init")
+            {
+                init
+                $output = @{"status" = "Success"; "capabilities" = @{"attach" = $false}} | ConvertTo-Json -Compress
+                LogAndPrint $output
+            }
+            elseif($command -eq "mount")
+            {
+                $normPath = NormalizePath $folder
+                $makePath = $normPath + "\..\"
+                Log "Make dir $makePath"
+                if(-not $(test-path $makePath -PathType Container))
+                {
+                    mkdir $makePath 2>&1 | Out-Null
+                }
+    
+                $options = $json  | convertfrom-json
+                DebugLog $options
+                
+                mount_command -path $normPath -options $options
+                LogAndPrint '{"status": "Success"}'
+            }
+            elseif($command -eq "unmount")
+            {
+                $normPath = NormalizePath $folder
+                Log "unmount $normpath"
+                unmount_command -path $normPath
+                LogAndPrint '{"status": "Success"}'
+            }
+            elseif($command -eq "test")
+            {
+                test
+            }
+            else 
+            {
+                $output = @{"status" = "Not supported"; "message" = "Unsupported command $command"} | ConvertTo-Json -Compress
+                Print $output
+                Log "Unsupported command $command"
+                $exitCode = 0
+            }
+        }
+        catch
+        {
+            $exception = $_
+            [string] $stack = $exception.ScriptStackTrace
+            $s = "Caught exception $exception with stack $stack"
+            Log $s
+            $output = @{"status" = "Failure"; "message" = "$s"} | ConvertTo-Json -Compress
+            Print $output
+            $exitCode = 1
+        }
+    
+        Log  " "
+        exit $exitCode
+    }
+  nfs.cmd: |-
+    @echo off
+    :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+    :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+    
+    setlocal enabledelayedexpansion
+    
+    :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+    :: Get the drive, path, and file name of this file, minus the .CMD extension
+    set scriptname=%~dpn0
+    
+    :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+    :: using environment variables to avoid escaping pains
+    set flexvolume_command=%1
+    set flexvolume_folder=%2
+    
+    :: Not trying to parse the json as it ended up being hard
+    :: script just gets the executed command line off the parent process (this script)
+    :: set flexvolume_json=%3
+    :: set flexvolume_all=%*
+    
+    :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+    :: launch powershell
+    PowerShell.exe -NoLogo -Sta -NoProfile -ExecutionPolicy "ByPass" -Command "%scriptname%.ps1"
+    goto :eof
+  nfs.ps1: |-
+    $global:ErrorActionPreference = [System.Management.Automation.ActionPreference]::Stop
+    $logSource = "KubeNFS"
+    
+    . $PSScriptRoot\flexvolume.ps1
+    
+    # Takes in \\servername\share\path or nfs://servername/share/path or //servername/share/path
+    # and returns \\servername\share\path
+    function MigrateLinuxCifsPathToWindows([string]$nfsPath)
+    {
+        if($nfsPath.StartsWith('nfs://','CurrentCultureIgnoreCase'))
+        {
+            $nfsPath = '//' + $nfsPath.SubString('nfs://'.Length)
+        }
+        if($nfsPath.StartsWith('//'))
+        {
+            $nfsPath = $nfsPath.replace('/', '\')
+        }
+        return $nfsPath
+    }
+    
+    function init()
+    {
+        cmd /c "dism /online /enable-feature /featurename:ServicesForNFS-ServerAndClient" 2>&1  | Out-Null
+        cmd /c "dism /online /enable-feature /featurename:ClientForNFS-Infrastructure" 2>&1  | Out-Null
+        #Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters -Name 'AllowInsecureGuestAuth' -Value '1'
+        #Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Control\'Session Manager'\'Memory Management' -Name 'LargeSystemCache' -Value '1'
+        #Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters -Name 'Size' -Value '3'
+    }
+    
+    function mount_command([string]$path, $options)
+    {
+        $remoteP = $options.source
+        $remoteP = MigrateLinuxCifsPathToWindows -nfsPath $remoteP
+        
+        Log  $remoteP
+
+        MakeSymLink $path $remoteP
+    }
+    
+    function unmount_command([string]$path)
+    {    
+        Log "removing symlink for path $path"
+    
+        #if there is no disk to disconnect then we don't care
+        try
+        {
+            DeleteSymLink $path
+        }
+        catch
+        {
+            Log "Did not do all steps of unmount, but will report success anyways"
+        }
+    }
+    
+    RunFlexVolume
+  Readme.md: |2-
+      
+        ,ad8888ba,       88 I8,        8        ,8I 88             888b      88    ad88  
+       d8"'    `"8b    ,d88 `8b       d8b       d8' ""             8888b     88   d8"  
+      d8'        `8b 888888  "8,     ,8"8,     ,8"                 88 `8b    88   88  
+      88          88     88   Y8     8P Y8     8P   88 8b,dPPYba,  88  `8b   88 MM88MMM ,adPPYba,  
+      88          88     88   `8b   d8' `8b   d8'   88 88P'   `"8a 88   `8b  88   88    I8[    ""  
+      Y8,    "88,,8P     88    `8a a8'   `8a a8'    88 88       88 88    `8b 88   88     `"Y8ba,  
+       Y8a.    Y88P      88     `8a8'     `8a8'     88 88       88 88     `8888   88    aa    ]8I  
+        `"Y8888Y"Y8a     88      `8'       `8'      88 88       88 88      `888   88    `"YbbdP"'  
+        
+      Driver has been installed.
+      Make sure /flexvolume-nfs from this container mounts to Kubernetes driver directory.
+        k8s 1.18.x
+        /usr/libexec/kubernetes/kubelet-plugins/volume/exec/
+      This path may be different in your system due to kubelet parameter --volume-plugin-dir.
+      This driver depends on the following packages to be installed on the host:
+        ## windows cmd
+        dism /online /enable-feature /featurename:ServicesForNFS-ServerAndClient
+        dism /online /enable-feature /featurename:ClientForNFS-Infrastructure
+      This container can now be stopped and removed.

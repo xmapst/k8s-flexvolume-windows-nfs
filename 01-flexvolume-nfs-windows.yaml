@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: flexvolume-nfs-windows
+  namespace: kube-system
+  labels:
+    k8s-volume: flexvolume
+spec:
+  selector:
+    matchLabels:
+      name: flexvolume-nfs-windows
+  template:
+    metadata:
+      labels:
+        name: flexvolume-nfs-windows
+    spec:
+      nodeSelector:
+        beta.kubernetes.io/os: windows
+      tolerations:
+      - key: "os"
+        operator: "Equal"
+        value: "windows"
+        effect: "NoSchedule"
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - operator: Exists
+      containers:
+      - name: flexvolume-nfs-windows
+        image: mcr.microsoft.com/powershell:7.1.0-preview.5-nanoserver-1809
+        imagePullPolicy: Always
+        command: 
+        - pwsh.exe
+        args:
+        - /Command
+        - mkdir -Force c:\host\q1-win~nfs.cmd;
+        - cp -Force c:\kubelet-plugins\flexvolume.ps1 c:\host\q1-win~nfs.cmd;
+        - cp -Force c:\kubelet-plugins\nfs.cmd c:\host\q1-win~nfs.cmd;
+        - cp -Force c:\kubelet-plugins\nfs.ps1 c:\host\q1-win~nfs.cmd;
+        - cat c:\kubelet-plugins\Readme.md;
+        - while ($true) {start-sleep -s 3600}
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: kubelet-plugins-host
+          mountPath: /host
+        - name: flexvolume-nfs
+          mountPath: /kubelet-plugins
+      volumes:
+      - name: kubelet-plugins-host
+        hostPath:
+          path: /usr/libexec/kubernetes/kubelet-plugins/volume/exec
+      - name: flexvolume-nfs
+        configMap:
+          defaultMode: 420
+          name: flexvolume-nfs-windows
